@@ -18,6 +18,7 @@ mail-strainer serve --open                      # 웹 UI (http://127.0.0.1:8765)
 mail-strainer fetch                             # 최근 3일 받은편지함 분류
 mail-strainer fetch --move-spam 0.8             # 분류 후 확신도 80% 이상 스팸을 스팸함으로
 mail-strainer move-spam --dry-run               # 옮길 대상 미리보기
+mail-strainer doctor                            # gws 응답·키 진단
 ```
 
 - 스팸 기준(내 프로젝트 설명 등)은 웹 UI의 "스팸 기준 프롬프트"에서 수정한다.

@@ -3,6 +3,7 @@
 
 사용법:
     mail-strainer setup                 # OpenRouter 키 저장
+    mail-strainer doctor                # 환경 진단
     mail-strainer fetch [--query "newer_than:3d in:inbox"] [--max 100] [--move-spam 0.8]
     mail-strainer move-spam [--min-confidence 0.8] [--dry-run] [--yes]
     mail-strainer serve [--port 8765] [--open]
@@ -20,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 ROOT = Path(__file__).resolve().parent  # ui.html 위치
 HOME = Path(os.environ.get("MAIL_STRAINER_HOME", Path.home() / ".config" / "mail-strainer"))
@@ -58,6 +59,30 @@ def load_env():
     if not key:
         raise RuntimeError("OpenRouter 키가 없어요. `mail-strainer setup`으로 저장하거나 OPENROUTER_KEY 환경변수를 설정하세요.")
     os.environ["OPENROUTER_KEY"] = key
+
+
+def doctor():
+    """환경 진단: gws 버전, Gmail 응답에 헤더가 들어오는지, 키 유무."""
+    try:
+        v = subprocess.run(["gws", "--version"], capture_output=True, text=True).stdout.splitlines()
+        print("gws:", v[0] if v else "?")
+    except FileNotFoundError:
+        sys.exit("gws가 없어요: npm install -g @googleworkspace/cli")
+    ids = list_message_ids("in:inbox", 1)
+    if not ids:
+        print("받은편지함에 메일이 없어요")
+    else:
+        for fmt in ("metadata", "full"):
+            res = gws("gmail", "users", "messages", "get", "--params",
+                      json.dumps({"userId": "me", "id": ids[0], "format": fmt}))
+            h = _headers(res)
+            print(f"format={fmt}: 최상위 키={sorted(res)} / 헤더 {len(h)}개 / Subject={'있음' if 'subject' in h else '없음'}")
+    try:
+        load_env()
+        print("OpenRouter 키: 있음")
+    except RuntimeError as ex:
+        print(ex)
+    print("데이터 폴더:", HOME)
 
 
 def setup():
@@ -144,16 +169,27 @@ def list_message_ids(query, max_results):
     return ids
 
 
+NO_SUBJECT = "(제목 없음)"
+
+
+def _headers(res):
+    return {h["name"].lower(): h["value"] for h in (res.get("payload") or {}).get("headers", [])}
+
+
 def get_message(mid):
-    res = gws("gmail", "users", "messages", "get", "--params", json.dumps({
-        "userId": "me", "id": mid, "format": "metadata",
-        "metadataHeaders": ["Subject", "From", "Date"],
-    }))
-    headers = {h["name"].lower(): h["value"] for h in res.get("payload", {}).get("headers", [])}
+    # metadataHeaders 필터는 gws 버전/환경에 따라 헤더가 비어 오는 경우가 있어 쓰지 않는다.
+    res = gws("gmail", "users", "messages", "get", "--params",
+              json.dumps({"userId": "me", "id": mid, "format": "metadata"}))
+    headers = _headers(res)
+    if "subject" not in headers and "from" not in headers:
+        # 그래도 비어 있으면 full 형식으로 한 번 더 시도
+        res = gws("gmail", "users", "messages", "get", "--params",
+                  json.dumps({"userId": "me", "id": mid, "format": "full"}))
+        headers = _headers(res)
     return {
         "id": res["id"],
         "thread_id": res.get("threadId"),
-        "subject": headers.get("subject", "(제목 없음)"),
+        "subject": headers.get("subject") or NO_SUBJECT,
         "sender": headers.get("from", ""),
         "date": headers.get("date", ""),
         "internal_date": int(res.get("internalDate", 0)),
@@ -257,7 +293,9 @@ def run_fetch(query=DEFAULT_QUERY, max_results=100, reclassify=False, log=print,
     conn = db()
     ids = list_message_ids(query, max_results)
     if not reclassify:
-        known = {r[0] for r in conn.execute("SELECT id FROM emails WHERE is_spam IS NOT NULL")}
+        # 헤더를 못 읽어 제목·보낸사람이 비어 저장된 메일은 다시 가져와 분류한다
+        known = {r[0] for r in conn.execute(
+            "SELECT id FROM emails WHERE is_spam IS NOT NULL AND NOT (subject = ? AND sender = '')", (NO_SUBJECT,))}
         ids = [i for i in ids if i not in known]
     log(f"새로 분류할 메일: {len(ids)}개")
     if not ids:
@@ -286,7 +324,8 @@ def run_fetch(query=DEFAULT_QUERY, max_results=100, reclassify=False, log=print,
                                     is_spam, confidence, reason, classified_at)
                 VALUES (:id, :thread_id, :subject, :sender, :date, :internal_date, :snippet,
                         :is_spam, :confidence, :reason, :now)
-                ON CONFLICT(id) DO UPDATE SET is_spam=excluded.is_spam, confidence=excluded.confidence,
+                ON CONFLICT(id) DO UPDATE SET subject=excluded.subject, sender=excluded.sender,
+                    date=excluded.date, snippet=excluded.snippet, is_spam=excluded.is_spam, confidence=excluded.confidence,
                     reason=excluded.reason, classified_at=excluded.classified_at""",
                 {**e, "is_spam": is_spam, "confidence": float(r.get("confidence") or 0),
                  "reason": r.get("reason", ""), "now": now})
@@ -411,6 +450,7 @@ def main():
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("setup", help="OpenRouter API 키 저장")
+    sub.add_parser("doctor", help="환경 진단 (gws 응답, 키)")
     f = sub.add_parser("fetch", help="메일 가져와서 분류")
     f.add_argument("--query", default=DEFAULT_QUERY)
     f.add_argument("--max", type=int, default=100)
@@ -427,6 +467,8 @@ def main():
     a = p.parse_args()
     if a.cmd == "setup":
         setup()
+    elif a.cmd == "doctor":
+        doctor()
     elif a.cmd == "fetch":
         run_fetch(a.query, a.max, a.reclassify, move_min_confidence=a.move_spam)
     elif a.cmd == "move-spam":
