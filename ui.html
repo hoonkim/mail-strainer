@@ -56,7 +56,7 @@
 
   <details class="panel" id="criteriaPanel">
     <summary>스팸 기준 프롬프트 (내 프로젝트 설명 등)</summary>
-    <p class="meta">여기 적은 내용이 분류 프롬프트에 그대로 들어갑니다. 아래 목록에서 정정한 사례도 자동으로 참고 예시로 추가됩니다.</p>
+    <p class="meta">여기 적은 내용이 Jev 판정 기준(user_rules)으로 그대로 들어갑니다. 아래 목록에서 정정한 사례도 자동으로 참고 자료로 추가됩니다.</p>
     <textarea id="criteria"></textarea>
     <div class="row" style="margin-top:8px"><button class="primary" id="saveBtn">저장</button><span class="meta" id="saveMsg"></span></div>
   </details>
@@ -67,7 +67,7 @@
     <button data-view="all">전체</button>
   </div>
   <div class="row" style="margin-bottom:8px" id="moveBar">
-    <span class="meta">확신도</span>
+    <span class="meta">스팸 점수</span>
     <input type="number" id="minConf" value="80" min="0" max="100" style="width:64px"><span class="meta">% 이상 스팸을</span>
     <button id="moveAllBtn">Gmail 스팸함으로 이동</button>
     <span id="moveConfirm" hidden>
@@ -105,7 +105,7 @@ async function loadList() {
         <div class="meta">${esc(r.sender)} · ${esc(d)}</div>
         <div class="reason"><span class="tag ${spam ? 'spam' : 'ham'}">${spam ? '스팸' : '정상'}${corrected ? ' (정정됨)' : ''}</span>
           ${r.moved_at ? '<span class="tag spam">스팸함</span>' : ''}
-          <span class="meta">${esc(r.reason)} (${Math.round((r.confidence || 0) * 100)}%)</span></div>
+          <span class="meta">스팸 점수 ${Math.round((r.confidence || 0) * 100)}%</span></div>
       </td>
       <td class="actions">
         ${spam && !r.moved_at ? `<button data-move="${esc(r.id)}">스팸함으로</button>` : ''}
