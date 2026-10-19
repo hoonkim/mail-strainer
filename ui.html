@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mail Strainer</title>
+<style>
+  :root { --bg:#f7f7f5; --card:#fff; --text:#1d1d1b; --muted:#6b6b66; --line:#e4e4df; --accent:#2f5bd3; --spam:#c2410c; --ok:#15803d; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#151514; --card:#1f1f1d; --text:#ececea; --muted:#9a9a94; --line:#33332f; --accent:#7b9cff; --spam:#fb923c; --ok:#4ade80; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", sans-serif; }
+  main { max-width:1000px; margin:0 auto; padding:24px 16px 64px; }
+  header { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; margin-bottom:16px; }
+  h1 { font-size:20px; margin:0; }
+  .stats { color:var(--muted); }
+  .tabs { display:flex; gap:4px; margin:16px 0 8px; flex-wrap:wrap; }
+  button { font:inherit; border:1px solid var(--line); background:var(--card); color:var(--text); border-radius:6px; padding:6px 12px; cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.active { border-color:var(--accent); color:var(--accent); font-weight:600; }
+  button:disabled { opacity:.5; cursor:wait; }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  input[type=text], input[type=number], textarea { font:inherit; color:var(--text); background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+  textarea { width:100%; min-height:280px; font-family:ui-monospace, Menlo, monospace; font-size:13px; }
+  details summary { cursor:pointer; font-weight:600; }
+  #log { color:var(--muted); white-space:pre-wrap; font-size:12px; margin-top:8px; }
+  table { width:100%; border-collapse:collapse; }
+  td { padding:10px 8px; border-top:1px solid var(--line); vertical-align:top; }
+  .subject a { color:var(--text); text-decoration:none; font-weight:600; }
+  .subject a:hover { text-decoration:underline; }
+  .meta { color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+  .reason { font-size:12px; margin-top:2px; }
+  .tag { font-size:11px; padding:1px 6px; border-radius:4px; border:1px solid currentColor; white-space:nowrap; }
+  .tag.spam { color:var(--spam); } .tag.ham { color:var(--ok); }
+  .actions { text-align:right; white-space:nowrap; }
+  .actions button + button { margin-left:4px; }
+  .empty { color:var(--muted); padding:24px 0; text-align:center; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Mail Strainer</h1>
+    <span class="stats" id="stats"></span>
+  </header>
+
+  <div class="panel">
+    <div class="row">
+      <input type="text" id="query" value="newer_than:3d in:inbox" size="28" title="Gmail 검색어">
+      <input type="number" id="max" value="100" style="width:80px" title="최대 개수">
+      <label><input type="checkbox" id="reclassify"> 이미 분류된 메일도 다시 분류</label>
+      <button class="primary" id="fetchBtn">메일 가져와서 분류</button>
+    </div>
+    <div id="log"></div>
+  </div>
+
+  <details class="panel" id="criteriaPanel">
+    <summary>스팸 기준 프롬프트 (내 프로젝트 설명 등)</summary>
+    <p class="meta">여기 적은 내용이 분류 프롬프트에 그대로 들어갑니다. 아래 목록에서 정정한 사례도 자동으로 참고 예시로 추가됩니다.</p>
+    <textarea id="criteria"></textarea>
+    <div class="row" style="margin-top:8px"><button class="primary" id="saveBtn">저장</button><span class="meta" id="saveMsg"></span></div>
+  </details>
+
+  <div class="tabs">
+    <button data-view="spam" class="active">스팸</button>
+    <button data-view="ham">정상</button>
+    <button data-view="all">전체</button>
+  </div>
+  <div class="row" style="margin-bottom:8px" id="moveBar">
+    <span class="meta">확신도</span>
+    <input type="number" id="minConf" value="80" min="0" max="100" style="width:64px"><span class="meta">% 이상 스팸을</span>
+    <button id="moveAllBtn">Gmail 스팸함으로 이동</button>
+    <span id="moveConfirm" hidden>
+      <span id="moveQuestion"></span>
+      <button class="primary" id="moveYes">이동</button>
+      <button id="moveNo">취소</button>
+    </span>
+    <span class="meta" id="moveMsg"></span>
+  </div>
+  <div class="panel" style="padding:0 8px">
+    <table><tbody id="list"></tbody></table>
+  </div>
+</main>
+<script>
+let view = 'spam';
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const api = (path, body) => fetch(path, body ? {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)} : {}).then(r => r.json());
+
+async function loadStats() {
+  const s = await api('/api/stats');
+  $('#stats').textContent = `전체 ${s.total || 0} · 스팸 ${s.spam || 0} · 스팸함 이동 ${s.moved || 0} · 정정 ${s.corrected || 0}`;
+}
+
+async function loadList() {
+  const rows = await api('/api/emails?view=' + view);
+  if (!rows.length) { $('#list').innerHTML = '<tr><td class="empty">메일이 없습니다</td></tr>'; return; }
+  $('#list').innerHTML = rows.map(r => {
+    const spam = (r.user_label ?? r.is_spam) === 1;
+    const corrected = r.user_label !== null && r.user_label !== r.is_spam;
+    const d = r.internal_date ? new Date(r.internal_date).toLocaleString('ko-KR', {month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '';
+    return `<tr>
+      <td>
+        <div class="subject"><a href="https://mail.google.com/mail/u/0/#all/${esc(r.id)}" target="_blank" rel="noopener">${esc(r.subject)}</a></div>
+        <div class="meta">${esc(r.sender)} · ${esc(d)}</div>
+        <div class="reason"><span class="tag ${spam ? 'spam' : 'ham'}">${spam ? '스팸' : '정상'}${corrected ? ' (정정됨)' : ''}</span>
+          ${r.moved_at ? '<span class="tag spam">스팸함</span>' : ''}
+          <span class="meta">${esc(r.reason)} (${Math.round((r.confidence || 0) * 100)}%)</span></div>
+      </td>
+      <td class="actions">
+        ${spam && !r.moved_at ? `<button data-move="${esc(r.id)}">스팸함으로</button>` : ''}
+        <button data-id="${esc(r.id)}" data-label="${spam ? 0 : 1}">${spam ? '스팸 아님' : '스팸으로'}</button></td>
+    </tr>`;
+  }).join('');
+}
+
+$('#list').addEventListener('click', async e => {
+  const mv = e.target.closest('button[data-move]');
+  if (mv) { mv.disabled = true; await api('/api/move', {ids: [mv.dataset.move]}); loadList(); loadStats(); return; }
+  const b = e.target.closest('button[data-id]');
+  if (!b) return;
+  await api('/api/label', {id: b.dataset.id, label: Number(b.dataset.label)});
+  loadList(); loadStats();
+});
+
+document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => {
+  view = b.dataset.view;
+  document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('active', x === b));
+  loadList();
+}));
+
+$('#fetchBtn').addEventListener('click', async () => {
+  const btn = $('#fetchBtn');
+  btn.disabled = true; $('#log').textContent = '가져오는 중… (메일 수에 따라 1~2분 걸릴 수 있어요)';
+  try {
+    const r = await api('/api/fetch', {query: $('#query').value, max: $('#max').value, reclassify: $('#reclassify').checked});
+    $('#log').textContent = (r.logs || []).join('\n') + (r.error ? '\n오류: ' + r.error : '');
+  } catch (err) { $('#log').textContent = '오류: ' + err; }
+  btn.disabled = false; loadList(); loadStats();
+});
+
+// 일부 브라우저(앱 내장 브라우저 등)는 confirm()을 막아서 페이지 안에서 한 번 더 확인받는다
+const showMoveConfirm = on => { $('#moveConfirm').hidden = !on; $('#moveAllBtn').hidden = on; };
+
+$('#moveAllBtn').addEventListener('click', async () => {
+  const conf = Number($('#minConf').value) / 100;
+  const {count} = await api('/api/move-preview?min_confidence=' + conf);
+  if (!count) { $('#moveMsg').textContent = '옮길 메일이 없어요'; return; }
+  $('#moveMsg').textContent = '';
+  $('#moveQuestion').textContent = `${count}개를 스팸함으로 옮길까요? ('스팸 아님'으로 되돌릴 수 있어요)`;
+  showMoveConfirm(true);
+});
+
+$('#moveNo').addEventListener('click', () => showMoveConfirm(false));
+
+$('#moveYes').addEventListener('click', async () => {
+  const btn = $('#moveYes'); btn.disabled = true;
+  $('#moveMsg').textContent = '옮기는 중…';
+  const r = await api('/api/move', {min_confidence: Number($('#minConf').value) / 100});
+  $('#moveMsg').textContent = r.error ? '오류: ' + r.error : `${r.moved}개 이동함`;
+  btn.disabled = false; showMoveConfirm(false); loadList(); loadStats();
+});
+
+$('#saveBtn').addEventListener('click', async () => {
+  await api('/api/criteria', {criteria: $('#criteria').value});
+  $('#saveMsg').textContent = '저장됨 · 다음 분류부터 적용 (기존 메일은 "다시 분류" 체크 후 실행)';
+});
+
+api('/api/criteria').then(r => { $('#criteria').value = r.criteria; });
+loadList(); loadStats();
+</script>
+</body>
+</html>
